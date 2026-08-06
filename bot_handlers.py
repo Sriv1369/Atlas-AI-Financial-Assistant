@@ -119,7 +119,10 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     agent = FinancialAgent(chat_id)
     try:
         if not extracted_context.startswith("Unsupported file format") and not extracted_context.startswith("Error"):
+            doc_id = database.save_user_document(chat_id, file_name, document.mime_type or "application/octet-stream", extracted_context)
+            logger.info(f"Saved document '{file_name}' to DB for chat {chat_id} with ID {doc_id}")
             response_text = agent.chat(user_msg=caption, file_context=extracted_context)
+            response_text = f"📂 *Document '{file_name}' indexed successfully.* (Doc ID: `{doc_id}`)\n\n" + response_text
         else:
             # Try to upload directly to Gemini using the Files API (supports PDFs natively)
             # Gemini file upload supports PDF

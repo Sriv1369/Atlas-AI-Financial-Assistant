@@ -4,9 +4,13 @@ import threading
 from urllib.parse import urlparse, parse_qs
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import datetime
+import os
+import io
+import pandas as pd
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 import google.auth.transport.requests
 
 from config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_PORT
@@ -18,7 +22,7 @@ logger = logging.getLogger(__name__)
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/calendar',
-    'https://www.googleapis.com/auth/spreadsheets.readonly',
+    'https://www.googleapis.com/auth/spreadsheets', # Upgraded to read/write
     'https://www.googleapis.com/auth/drive.readonly'
 ]
 
@@ -340,3 +344,188 @@ def read_google_sheet(chat_id: int, spreadsheet_id: str, range_name: str) -> str
     except Exception as e:
         logger.error(f"Error reading Google Sheet {spreadsheet_id} for {chat_id}: {e}")
         return f"Failed to read Google Sheet: {str(e)}"
+
+def write_google_sheet(chat_id: int, spreadsheet_id: str, range_name: str, values: list) -> str:
+    """
+    Write or update values in a Google Sheet range.
+    values: A list of lists representing rows (e.g. [["Header1", "Header2"], ["Row1Col1", "Row1Col2"]]).
+    """
+    creds = get_google_creds(chat_id)
+    if not creds:
+        return "Your Google account is not connected. Type 'connect google' to link it."
+        
+    try:
+        service = build('sheets', 'v4', credentials=creds)
+        body = {
+            'values': values
+        }
+        result = service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=range_name,
+            valueInputOption='RAW',
+            body=body
+        ).execute()
+        updated_cells = result.get('updatedCells', 0)
+        return f"Google Sheet updated successfully. Updated {updated_cells} cells in range '{range_name}'."
+    except Exception as e:
+        logger.error(f"Error writing to Google Sheet {spreadsheet_id} for {chat_id}: {e}")
+        return f"Failed to write to Google Sheet: {str(e)}"
+
+def get_email_details(chat_id: int, message_id: str) -> str:
+    """
+    Retrieve the full body content of a specific email using its message ID.
+    """
+    creds = get_google_creds(chat_id)
+    if not creds:
+        return "Your Google account is not connected. Type 'connect google' to link it."
+        
+    try:
+        service = build('gmail', 'v1', credentials=creds)
+        msg = service.users().messages().get(userId='me', id=message_id, format='full').execute()
+        
+        headers = msg.get('payload', {}).get('headers', [])
+        headers_dict = {h['name'].lower(): h['value'] for h in headers}
+        sender = headers_dict.get('from', 'Unknown Sender')
+        subject = headers_dict.get('subject', '(No Subject)')
+        date = headers_dict.get('date', 'Unknown Date')
+        
+        # Extract body text from the message parts
+        body = ""
+        payload = msg.get('payload', {})
+        
+        def extract_body_parts(part):
+            text_body = ""
+            mime_type = part.get('mimeType', '')
+            body_data = part.get('body', {}).get('data', '')
+            
+            if mime_type == 'text/plain' and body_data:
+                import base64
+                try:
+                    text_body += base64.urlsafe_b64decode(body_data).decode('utf-8', errors='ignore')
+                except Exception:
+                    pass
+            elif 'parts' in part:
+                for subpart in part['parts']:
+                    text_body += extract_body_parts(subpart)
+            return text_body
+            
+        if 'parts' in payload:
+            for part in payload['parts']:
+                body += extract_body_parts(part)
+        else:
+            body_data = payload.get('body', {}).get('data', '')
+            if body_data:
+                import base64
+                try:
+                    body = base64.urlsafe_b64decode(body_data).decode('utf-8', errors='ignore')
+                except Exception:
+                    pass
+                    
+        if not body.strip():
+            body = msg.get('snippet', '')
+            
+        result = (
+            f"**Email Details:**\n"
+            f"• **From:** {sender}\n"
+            f"• **Subject:** {subject}\n"
+            f"• **Date:** {date}\n"
+            f"• **ID:** `{message_id}`\n\n"
+            f"--- Body ---\n"
+            f"{body[:4000]}"
+        )
+        if len(body) > 4000:
+            result += "\n\n[Truncated: Email body exceeds 4,000 characters]"
+        return result
+    except Exception as e:
+        logger.error(f"Error fetching email {message_id} for {chat_id}: {e}")
+        return f"Failed to retrieve email details: {str(e)}"
+
+def search_google_drive(chat_id: int, query: str, max_results: int = 5) -> str:
+    """
+    Search files in Google Drive by name.
+    """
+    creds = get_google_creds(chat_id)
+    if not creds:
+        return "Your Google account is not connected. Type 'connect google' to link it."
+        
+    try:
+        service = build('drive', 'v3', credentials=creds)
+        # Escape single quotes in search query
+        safe_query = query.replace("'", "\\'")
+        q_str = f"name contains '{safe_query}' and trashed = false"
+        
+        results = service.files().list(
+            q=q_str,
+            pageSize=max_results,
+            fields="files(id, name, mimeType)"
+        ).execute()
+        
+        files = results.get('files', [])
+        if not files:
+            return f"No Google Drive files found matching query: '{query}'."
+            
+        result = f"**Google Drive Search Results for '{query}':**\n\n"
+        for f in files:
+            result += f"• **{f['name']}**\n  ID: `{f['id']}` | Type: `{f['mimeType']}`\n\n"
+        return result
+    except Exception as e:
+        logger.error(f"Error searching Google Drive for {chat_id}: {e}")
+        return f"Failed to search Google Drive: {str(e)}"
+
+def read_google_drive_file(chat_id: int, file_id: str) -> str:
+    """
+    Read or download a file from Google Drive and return its content context.
+    """
+    creds = get_google_creds(chat_id)
+    if not creds:
+        return "Your Google account is not connected. Type 'connect google' to link it."
+        
+    try:
+        service = build('drive', 'v3', credentials=creds)
+        file_metadata = service.files().get(fileId=file_id).execute()
+        name = file_metadata.get('name', 'downloaded_file')
+        mime_type = file_metadata.get('mimeType', '')
+        
+        # Google Docs require exporting, binary files require direct downloading
+        if mime_type == 'application/vnd.google-apps.document':
+            request = service.files().export_media(fileId=file_id, mimeType='text/plain')
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while done is False:
+                status, done = downloader.next_chunk()
+            content = fh.getvalue().decode('utf-8', errors='ignore')
+            return f"--- Google Doc: {name} ---\n\n{content[:50000]}"
+            
+        elif mime_type == 'application/vnd.google-apps.spreadsheet':
+            return f"This file '{name}' is a Google Spreadsheet. Please use the `read_google_sheet` tool with range details (e.g. Sheet1!A1:D20) to view its contents."
+            
+        else:
+            # Download binary/text file
+            request = service.files().get_media(fileId=file_id)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while done is False:
+                status, done = downloader.next_chunk()
+                
+            # Write bytes to a local temporary file to run process_uploaded_document
+            temp_dir = "downloads"
+            os.makedirs(temp_dir, exist_ok=True)
+            ext = os.path.splitext(name)[1].lower()
+            temp_path = os.path.join(temp_dir, f"gdrive_{chat_id}_{file_id}{ext}")
+            
+            with open(temp_path, 'wb') as f:
+                f.write(fh.getvalue())
+                
+            try:
+                from tools.document_tools import process_uploaded_document
+                extracted_text = process_uploaded_document(temp_path)
+                return extracted_text
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                    
+    except Exception as e:
+        logger.error(f"Error reading Google Drive file {file_id} for {chat_id}: {e}")
+        return f"Failed to read Google Drive file: {str(e)}"

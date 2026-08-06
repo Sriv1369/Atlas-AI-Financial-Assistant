@@ -202,3 +202,103 @@ def get_market_indices() -> str:
         )
         
     return result
+
+def get_sec_filings(ticker: str) -> str:
+    """
+    Get recent SEC filings (10-K, 10-Q, 8-K) for a company using web search.
+    """
+    ticker = ticker.upper().strip()
+    query = f"{ticker} SEC filings SEC.gov recent"
+    try:
+        from tools.web_tools import search_web
+        search_res = search_web(query, max_results=4)
+        return (
+            f"**Recent SEC Filings for {ticker}:**\n\n"
+            f"Gathered from SEC EDGAR and official filings directories:\n\n"
+            f"{search_res}"
+        )
+    except Exception as e:
+        logger.error(f"Error fetching SEC filings for {ticker}: {e}")
+        return f"Failed to retrieve SEC filings for {ticker}: {str(e)}"
+
+def get_earnings_calendar(ticker: str = None) -> str:
+    """
+    Get upcoming earnings release dates.
+    If ticker is provided, gets specific scheduled date.
+    If no ticker is provided, gets general upcoming releases for major companies.
+    """
+    try:
+        if ticker:
+            ticker = ticker.upper().strip()
+            t = _get_ticker(ticker)
+            calendar = t.calendar
+            
+            # yfinance returns dictionary or df for calendar
+            if calendar is not None:
+                # Format the calendar
+                if isinstance(calendar, dict):
+                    # Python dictionary format
+                    date_val = calendar.get('Earnings Date', ['N/A'])[0]
+                    if hasattr(date_val, 'strftime'):
+                        date_str = date_val.strftime('%Y-%m-%d')
+                    else:
+                        date_str = str(date_val)
+                    avg = calendar.get('Earnings Average', [0.0])[0]
+                    low = calendar.get('Earnings Low', [0.0])[0]
+                    high = calendar.get('Earnings High', [0.0])[0]
+                    
+                    result = (
+                        f"**Upcoming Earnings: {ticker}**\n"
+                        f"• **Expected Earnings Date:** {date_str}\n"
+                        f"• **EPS Average Estimate:** {avg:.2f}\n"
+                        f"• **EPS Range:** {low:.2f} - {high:.2f}\n"
+                    )
+                else:
+                    # Pandas DataFrame format
+                    result = f"**Upcoming Earnings Calendar for {ticker}:**\n\n{calendar.to_markdown()}"
+                return result
+            else:
+                # Fallback to search if calendar is empty
+                query = f"{ticker} upcoming earnings date release"
+                from tools.web_tools import search_web
+                search_res = search_web(query, max_results=3)
+                return (
+                    f"**Upcoming Earnings: {ticker} (Search Fallback)**\n"
+                    f"Earnings calendar not directly populated in standard feeds. Recent updates:\n\n"
+                    f"{search_res}"
+                )
+        else:
+            # General earnings calendar this week
+            from tools.web_tools import search_web
+            search_res = search_web("major earnings reports release scheduled this week", max_results=4)
+            return (
+                f"**Earnings Calendar (This Week):**\n\n"
+                f"{search_res}"
+            )
+    except Exception as e:
+        logger.error(f"Error fetching earnings calendar: {e}")
+        # Search fallback on exception
+        fallback_ticker = ticker if ticker else "market"
+        query = f"{fallback_ticker} upcoming earnings calendar releases this week"
+        try:
+            from tools.web_tools import search_web
+            return search_web(query, max_results=3)
+        except Exception:
+            return f"Failed to retrieve earnings calendar: {str(e)}"
+
+def get_economic_calendar() -> str:
+    """
+    Get major macroeconomic events (CPI, GDP, interest rate decisions) scheduled for this week.
+    """
+    query = "major macroeconomic events economic calendar CPI GDP FOMC this week"
+    try:
+        from tools.web_tools import search_web
+        search_res = search_web(query, max_results=5)
+        return (
+            f"**Macroeconomic Calendar (This Week):**\n\n"
+            f"Key indicators, rate announcements, and speeches:\n\n"
+            f"{search_res}"
+        )
+    except Exception as e:
+        logger.error(f"Error fetching economic calendar: {e}")
+        return f"Failed to retrieve economic calendar: {str(e)}"

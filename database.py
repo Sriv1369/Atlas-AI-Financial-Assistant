@@ -48,6 +48,45 @@ def init_db():
     )
     """)
     
+    # Create User Documents Table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS user_documents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER,
+        file_name TEXT,
+        mime_type TEXT,
+        content TEXT,
+        timestamp TEXT,
+        FOREIGN KEY(chat_id) REFERENCES users(chat_id)
+    )
+    """)
+    
+    # Create User Alerts Table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS user_alerts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER,
+        ticker TEXT,
+        alert_type TEXT, -- 'percentage' or 'price'
+        target_value REAL,
+        condition TEXT, -- 'above', 'below', 'movement'
+        triggered INTEGER DEFAULT 0,
+        timestamp TEXT,
+        FOREIGN KEY(chat_id) REFERENCES users(chat_id)
+    )
+    """)
+    
+    # Create User Memories Table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS user_memories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER,
+        memory_text TEXT,
+        timestamp TEXT,
+        FOREIGN KEY(chat_id) REFERENCES users(chat_id)
+    )
+    """)
+    
     conn.commit()
     conn.close()
     logger.info("Database initialized successfully.")
@@ -157,5 +196,118 @@ def get_google_credentials(chat_id):
 def delete_google_credentials(chat_id):
     conn = get_db_connection()
     conn.execute("DELETE FROM google_credentials WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+# User Documents Helper Functions
+def save_user_document(chat_id: int, file_name: str, mime_type: str, content: str) -> int:
+    conn = get_db_connection()
+    timestamp = datetime.now().isoformat()
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO user_documents (chat_id, file_name, mime_type, content, timestamp)
+    VALUES (?, ?, ?, ?, ?)
+    """, (chat_id, file_name, mime_type, content, timestamp))
+    doc_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return doc_id
+
+def list_user_documents(chat_id: int):
+    conn = get_db_connection()
+    rows = conn.execute("""
+    SELECT id, file_name, mime_type, timestamp 
+    FROM user_documents 
+    WHERE chat_id = ? 
+    ORDER BY id DESC
+    """, (chat_id,)).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_user_document_content(chat_id: int, doc_id: int):
+    conn = get_db_connection()
+    row = conn.execute("""
+    SELECT file_name, content 
+    FROM user_documents 
+    WHERE chat_id = ? AND id = ?
+    """, (chat_id, doc_id)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+# User Alerts Helper Functions
+def create_user_alert(chat_id: int, ticker: str, alert_type: str, target_value: float, condition: str) -> int:
+    conn = get_db_connection()
+    timestamp = datetime.now().isoformat()
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO user_alerts (chat_id, ticker, alert_type, target_value, condition, triggered, timestamp)
+    VALUES (?, ?, ?, ?, ?, 0, ?)
+    """, (chat_id, ticker.upper().strip(), alert_type.lower().strip(), target_value, condition.lower().strip(), timestamp))
+    alert_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return alert_id
+
+def get_active_alerts():
+    conn = get_db_connection()
+    rows = conn.execute("""
+    SELECT id, chat_id, ticker, alert_type, target_value, condition 
+    FROM user_alerts 
+    WHERE triggered = 0
+    """).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def mark_alert_triggered(alert_id: int):
+    conn = get_db_connection()
+    conn.execute("UPDATE user_alerts SET triggered = 1 WHERE id = ?", (alert_id,))
+    conn.commit()
+    conn.close()
+
+def list_user_alerts(chat_id: int):
+    conn = get_db_connection()
+    rows = conn.execute("""
+    SELECT id, ticker, alert_type, target_value, condition, triggered, timestamp 
+    FROM user_alerts 
+    WHERE chat_id = ? 
+    ORDER BY id DESC
+    """, (chat_id,)).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def delete_user_alert(chat_id: int, alert_id: int):
+    conn = get_db_connection()
+    conn.execute("DELETE FROM user_alerts WHERE chat_id = ? AND id = ?", (chat_id, alert_id))
+    conn.commit()
+    conn.close()
+
+# User Memories Helper Functions
+def add_user_memory(chat_id: int, memory_text: str) -> int:
+    conn = get_db_connection()
+    timestamp = datetime.now().isoformat()
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO user_memories (chat_id, memory_text, timestamp)
+    VALUES (?, ?, ?)
+    """, (chat_id, memory_text.strip(), timestamp))
+    memory_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return memory_id
+
+def get_user_memories(chat_id: int):
+    conn = get_db_connection()
+    rows = conn.execute("""
+    SELECT id, memory_text, timestamp 
+    FROM user_memories 
+    WHERE chat_id = ? 
+    ORDER BY id DESC
+    """, (chat_id,)).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def delete_user_memory(chat_id: int, memory_id: int):
+    conn = get_db_connection()
+    conn.execute("DELETE FROM user_memories WHERE chat_id = ? AND id = ?", (chat_id, memory_id))
     conn.commit()
     conn.close()

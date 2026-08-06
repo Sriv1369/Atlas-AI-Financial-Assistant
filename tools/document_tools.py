@@ -2,6 +2,7 @@ import os
 import pypdf
 import pandas as pd
 import logging
+from pptx import Presentation
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,25 @@ def read_text_file(file_path: str) -> str:
     except Exception as e:
         return f"Error reading text file: {str(e)}"
 
+def extract_text_from_pptx(file_path: str) -> str:
+    """
+    Extract text content from a PowerPoint (.pptx) file slides.
+    """
+    try:
+        prs = Presentation(file_path)
+        text = f"--- PowerPoint Document: {os.path.basename(file_path)} ---\n"
+        for i, slide in enumerate(prs.slides):
+            slide_text = []
+            for shape in slide.shapes:
+                if hasattr(shape, "text") and shape.text.strip():
+                    slide_text.append(shape.text.strip())
+            if slide_text:
+                text += f"\n--- Slide {i+1} ---\n" + "\n".join(slide_text) + "\n"
+        return text
+    except Exception as e:
+        logger.error(f"Error extracting PPTX: {e}")
+        return f"Error reading PowerPoint file: {str(e)}"
+
 def process_uploaded_document(file_path: str) -> str:
     """
     Detect file type and extract content.
@@ -79,7 +99,9 @@ def process_uploaded_document(file_path: str) -> str:
         return extract_text_from_pdf(file_path)
     elif ext in ['.xlsx', '.xls', '.csv']:
         return extract_data_from_excel(file_path)
+    elif ext == '.pptx':
+        return extract_text_from_pptx(file_path)
     elif ext in ['.txt', '.json', '.md', '.log']:
         return read_text_file(file_path)
     else:
-        return f"Unsupported file format '{ext}'. Supported formats: PDF, CSV, Excel, TXT, JSON, MD."
+        return f"Unsupported file format '{ext}'. Supported formats: PDF, CSV, Excel, PPTX, TXT, JSON, MD."
