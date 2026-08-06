@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import google.generativeai as genai
-from config import GEMINI_API_KEY, GEMINI_MODEL
+from config import GEMINI_API_KEY, GEMINI_MODEL, GROK_API_KEY, GROK_MODEL
 import database
 from tools.market_tools import get_stock_price, get_company_financials, get_company_news, get_market_indices
 from tools.web_tools import search_web, search_financial_news
@@ -168,59 +168,75 @@ Current user configuration:
             update_profile
         ]
 
-    def chat(self, user_msg: str, file_context: str = None, audio_path: str = None) -> str:
+    def chat(self, user_msg: str, file_context: str = None, audio_path: str = None, image_path: str = None) -> str:
         """
         Main interface to process user inputs and returns responses.
-        Loads history, configures the Gemini generative model with tools, and manages automatic function calling.
+        Routes to Grok if GROK_API_KEY is configured, otherwise routes to Gemini.
         """
         # Save user message to database
         database.add_chat_message(self.chat_id, 'user', user_msg)
         
-        # Load conversation history
+        # Route to Grok if key is configured
+        if GROK_API_KEY:
+            logger.info(f"Routing query to Grok for chat_id {self.chat_id}")
+            
+            # If audio path is supplied, try to transcribe it using Gemini's lighter model first
+            if audio_path and os.path.exists(audio_path):
+                try:
+                    logger.info("Transcribing voice note using Gemini for Grok routing...")
+                    transcribe_model = genai.GenerativeModel(model_name="gemini-2.0-flash-lite")
+                    uploaded_file = genai.upload_file(path=audio_path, mime_type="audio/ogg")
+                    transcribe_res = transcribe_model.generate_content(
+                        [uploaded_file, "Please transcribe this audio exactly. Do not add any other comment or greeting."]
+                    )
+                    transcription = transcribe_res.text
+                    user_msg = f"[Transcribed Voice Note] {transcription}\n{user_msg}" if user_msg else f"[Transcribed Voice Note] {transcription}"
+                except Exception as e:
+                    logger.warning(f"Voice note transcription failed: {e}")
+                    user_msg = f"[Uploaded Audio Note - Transcription unavailable: {str(e)}]\n{user_msg}" if user_msg else "[Uploaded Audio Note - Transcription unavailable]"
+            
+            response_text = self._chat_grok(user_msg, file_context, image_path)
+            database.add_chat_message(self.chat_id, 'assistant', response_text)
+            return response_text
+
+        # Otherwise route to Gemini
+        logger.info(f"Routing query to Gemini for chat_id {self.chat_id}")
         history = database.get_chat_history(self.chat_id, limit=15)
-        
-        # Prepare generative model
         system_instruction = self._get_system_instructions()
         tools = self._get_tools()
         
-        # We use gemini-2.5-pro since it is much better at complex multi-turn reasoning and tool calling
         model = genai.GenerativeModel(
             model_name=GEMINI_MODEL,
             tools=tools,
             system_instruction=system_instruction
         )
         
-        # Convert DB history format to Gemini Chat history format
         gemini_history = []
-        for h in history[:-1]: # exclude the latest user message which we will send to start the response
+        for h in history[:-1]:
             role = 'user' if h['role'] == 'user' else 'model'
             gemini_history.append({
                 'role': role,
                 'parts': [h['message']]
             })
             
-        # Start chat
         chat_session = model.start_chat(history=gemini_history, enable_automatic_function_calling=True)
         
         try:
-            logger.info(f"Sending message to Gemini for chat_id {self.chat_id}")
-            
-            # Prepare message parts
             parts = []
-            
-            # If an audio voice note is uploaded
             if audio_path and os.path.exists(audio_path):
                 logger.info(f"Uploading audio file {audio_path} to Gemini...")
-                # Gemini SDK supports direct upload of audio
                 uploaded_file = genai.upload_file(path=audio_path, mime_type="audio/ogg")
                 parts.append(uploaded_file)
-                # If the user also sent text alongside voice, append it
                 if user_msg:
                     parts.append(user_msg)
                 else:
                     parts.append("Respond to this voice message.")
+            elif image_path and os.path.exists(image_path):
+                logger.info(f"Uploading image file {image_path} to Gemini...")
+                uploaded_file = genai.upload_file(path=image_path, mime_type="image/jpeg")
+                parts.append(uploaded_file)
+                parts.append(user_msg or "Analyze this image.")
             else:
-                # Normal text message + optional document text attachment
                 msg_content = user_msg
                 if file_context:
                     msg_content = f"{file_context}\n\nUser Query: {user_msg}"
@@ -229,7 +245,6 @@ Current user configuration:
             response = chat_session.send_message(parts)
             response_text = response.text
             
-            # Save assistant response to DB
             database.add_chat_message(self.chat_id, 'assistant', response_text)
             return response_text
             
@@ -238,3 +253,305 @@ Current user configuration:
             error_msg = f"Sorry, I encountered an issue processing that. Please check your credentials or try again later. (Error: {str(e)})"
             database.add_chat_message(self.chat_id, 'assistant', error_msg)
             return error_msg
+
+    def _chat_grok(self, user_msg: str, file_context: str = None, image_path: str = None) -> str:
+        """
+        OpenAI-compatible request dispatcher for xAI Grok-2, implementing loop-based tool calls.
+        """
+        import requests
+        import base64
+        
+        system_instruction = self._get_system_instructions()
+        tools_list = self._get_tools()
+        tools_map = {t.__name__: t for t in tools_list}
+        
+        openai_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_stock_price",
+                    "description": "Get current stock price, change, percent change, daily range, and volume for a ticker.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "ticker": {"type": "string", "description": "Stock symbol (e.g. AAPL)"}
+                        },
+                        "required": ["ticker"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_company_financials",
+                    "description": "Get key financial metrics, revenue, EBITDA, margins, ratios, and growth rates.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "ticker": {"type": "string", "description": "Stock symbol (e.g. NVDA)"}
+                        },
+                        "required": ["ticker"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_company_news",
+                    "description": "Get recent news articles for a company.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "ticker": {"type": "string", "description": "Stock symbol (e.g. TSLA)"}
+                        },
+                        "required": ["ticker"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_market_indices",
+                    "description": "Get performance summaries of major market indices (S&P 500, Nasdaq, Dow Jones, Russell 2000, 10Y Yield).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_web",
+                    "description": "Search the web for general news, macroeconomic events, and corporate actions.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Search query"},
+                            "max_results": {"type": "integer", "description": "Number of results to retrieve (default: 5)"}
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_financial_news",
+                    "description": "Search specifically for financial or corporate news.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Financial search query"},
+                            "max_results": {"type": "integer", "description": "Number of results to retrieve (default: 5)"}
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_calendar_events",
+                    "description": "Retrieve upcoming meetings and events from your connected Google Calendar.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "max_results": {"type": "integer", "description": "Max results to return (default: 5)"}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_calendar_event",
+                    "description": "Schedule a meeting or calendar event. Times in ISO 8601 format (YYYY-MM-DDTHH:MM:SS), e.g., '2026-08-06T14:00:00'.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "summary": {"type": "string", "description": "Title of the meeting"},
+                            "start_time": {"type": "string", "description": "Start time in ISO 8601 format"},
+                            "end_time": {"type": "string", "description": "End time in ISO 8601 format"},
+                            "description": {"type": "string", "description": "Optional description of the event"}
+                        },
+                        "required": ["summary", "start_time", "end_time"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_emails",
+                    "description": "Search Gmail emails based on queries.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Search query"},
+                            "max_results": {"type": "integer", "description": "Max results to return (default: 5)"}
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_google_sheet",
+                    "description": "Read cell values from a Google Sheet.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "spreadsheet_id": {"type": "string", "description": "Spreadsheet ID"},
+                            "range_name": {"type": "string", "description": "Cell range (e.g. Sheet1!A1:D20)"}
+                        },
+                        "required": ["spreadsheet_id", "range_name"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_google_auth_link",
+                    "description": "Generate a custom OAuth link to connect the user's Google Workspace account.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "update_watchlist",
+                    "description": "Add or remove a stock ticker on the user's watchlist.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "description": "'add' or 'remove'"},
+                            "ticker": {"type": "string", "description": "Stock symbol (e.g. TSLA)"}
+                        },
+                        "required": ["action", "ticker"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "update_profile",
+                    "description": "Update the user's profile details.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "role": {"type": "string", "description": "Professional role"},
+                            "briefing_time": {"type": "string", "description": "Daily briefing schedule time (e.g. '08:00', '17:30')"},
+                            "timezone": {"type": "string", "description": "Preferred timezone (e.g. 'Asia/Kolkata')"},
+                            "onboarding_status": {"type": "string", "description": "Onboarding status ('not_started', 'started', 'completed')"}
+                        }
+                    }
+                }
+            }
+        ]
+        
+        # Load conversation history from DB
+        history = database.get_chat_history(self.chat_id, limit=15)
+        
+        # Build messages payload
+        messages = [{"role": "system", "content": system_instruction}]
+        
+        # Add past conversations
+        for h in history[:-1]:
+            messages.append({
+                "role": "user" if h["role"] == "user" else "assistant",
+                "content": h["message"]
+            })
+            
+        # Format current request
+        latest_content = []
+        text_part = user_msg or "Respond to my query."
+        if file_context:
+            text_part = f"{file_context}\n\nUser Query: {user_msg}"
+            
+        latest_content.append({"type": "text", "text": text_part})
+        
+        # Add base64 image if uploaded
+        if image_path and os.path.exists(image_path):
+            try:
+                with open(image_path, "rb") as image_file:
+                    encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+                latest_content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{encoded_string}"
+                    }
+                })
+                logger.info("Successfully appended visual image content for Grok.")
+            except Exception as e:
+                logger.error(f"Failed to encode image for Grok: {e}")
+                
+        messages.append({"role": "user", "content": latest_content})
+        
+        url = "https://api.x.ai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {GROK_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        max_turns = 8
+        for turn in range(max_turns):
+            payload = {
+                "model": GROK_MODEL,
+                "messages": messages,
+                "tools": openai_tools,
+                "tool_choice": "auto"
+            }
+            
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=45)
+                if response.status_code != 200:
+                    logger.error(f"Grok API returned status {response.status_code}: {response.text}")
+                    return f"Error communicating with Grok API (Status {response.status_code}): {response.text}"
+                    
+                resp_json = response.json()
+                choice = resp_json["choices"][0]
+                message_obj = choice["message"]
+                
+                # Append Grok's message to context list
+                # Note: xAI requires tool_calls object layout to match exactly
+                messages.append(message_obj)
+                
+                tool_calls = message_obj.get("tool_calls")
+                if not tool_calls:
+                    return message_obj.get("content") or "No message content returned."
+                    
+                # Loop through calls
+                for tc in tool_calls:
+                    func_name = tc["function"]["name"]
+                    func_args = json.loads(tc["function"]["arguments"])
+                    call_id = tc["id"]
+                    
+                    logger.info(f"Grok requesting tool call: {func_name} with args {func_args}")
+                    
+                    if func_name in tools_map:
+                        try:
+                            # Execute the tool
+                            res = tools_map[func_name](**func_args)
+                        except Exception as e:
+                            logger.error(f"Error executing local tool {func_name}: {e}")
+                            res = f"Error executing tool: {str(e)}"
+                    else:
+                        res = f"Tool {func_name} is not supported."
+                        
+                    # Append result to log
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": func_name,
+                        "content": str(res)
+                    })
+                    
+            except Exception as e:
+                logger.error(f"Exception during Grok API turn: {e}")
+                return f"Sorry, I encountered an issue processing that with Grok. (Error: {str(e)})"
+                
+        return "Grok tool execution depth limit exceeded."

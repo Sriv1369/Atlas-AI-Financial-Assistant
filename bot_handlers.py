@@ -144,37 +144,9 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"Downloaded photo from {chat_id} to {file_path}")
     
-    # Upload photo to Gemini using the Files API
     agent = FinancialAgent(chat_id)
     try:
-        logger.info(f"Uploading image file {file_path} to Gemini...")
-        uploaded_file = genai.upload_file(path=file_path, mime_type="image/jpeg")
-        
-        # In Gemini API, we can pass the uploaded file reference in the parts
-        system_instruction = agent._get_system_instructions()
-        tools = agent._get_tools()
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL,
-            tools=tools,
-            system_instruction=system_instruction
-        )
-        
-        # Load conversation history
-        history = database.get_chat_history(chat_id, limit=15)
-        gemini_history = []
-        for h in history:
-            role = 'user' if h['role'] == 'user' else 'model'
-            gemini_history.append({'role': role, 'parts': [h['message']]})
-            
-        chat_session = model.start_chat(history=gemini_history, enable_automatic_function_calling=True)
-        
-        # Send photo and caption
-        response = chat_session.send_message([uploaded_file, caption])
-        response_text = response.text
-        
-        # Save chat messages
-        database.add_chat_message(chat_id, 'user', f"[Sent Image] {caption}")
-        database.add_chat_message(chat_id, 'assistant', response_text)
+        response_text = agent.chat(user_msg=caption, image_path=file_path)
     finally:
         # Clean up local file
         if os.path.exists(file_path):
