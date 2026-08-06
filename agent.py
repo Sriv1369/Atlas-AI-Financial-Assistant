@@ -497,10 +497,39 @@ Current user configuration:
             "Content-Type": "application/json"
         }
         
+        # Resolve active Grok model dynamically from user's API Key allowed models list
+        active_model = GROK_MODEL
+        try:
+            models_url = "https://api.x.ai/v1/models"
+            models_headers = {"Authorization": f"Bearer {GROK_API_KEY}"}
+            models_resp = requests.get(models_url, headers=models_headers, timeout=10)
+            if models_resp.status_code == 200:
+                models_data = models_resp.json()
+                model_ids = [m["id"] for m in models_data.get("data", [])]
+                if model_ids:
+                    if GROK_MODEL not in model_ids:
+                        fallback = None
+                        for mid in model_ids:
+                            # Prefer non-vision, non-image grok models
+                            if "grok" in mid.lower() and "vision" not in mid.lower() and "imagine" not in mid.lower():
+                                fallback = mid
+                                break
+                        if not fallback:
+                            for mid in model_ids:
+                                if "grok" in mid.lower():
+                                    fallback = mid
+                                    break
+                        if not fallback:
+                            fallback = model_ids[0]
+                        logger.info(f"Model '{GROK_MODEL}' not in key list. Falling back to active model '{fallback}' (Allowed: {model_ids})")
+                        active_model = fallback
+        except Exception as e:
+            logger.error(f"Failed to fetch active Grok models: {e}")
+
         max_turns = 8
         for turn in range(max_turns):
             payload = {
-                "model": GROK_MODEL,
+                "model": active_model,
                 "messages": messages,
                 "tools": openai_tools,
                 "tool_choice": "auto"
