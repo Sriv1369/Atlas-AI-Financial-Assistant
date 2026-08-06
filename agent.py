@@ -538,8 +538,22 @@ Current user configuration:
             try:
                 response = requests.post(url, json=payload, headers=headers, timeout=45)
                 if response.status_code != 200:
+                    allowed_models = "Unable to fetch"
+                    try:
+                        m_resp = requests.get("https://api.x.ai/v1/models", headers={"Authorization": f"Bearer {GROK_API_KEY}"}, timeout=5)
+                        if m_resp.status_code == 200:
+                            allowed_models = ", ".join([m["id"] for m in m_resp.json().get("data", [])])
+                        else:
+                            allowed_models = f"Error {m_resp.status_code}: {m_resp.text}"
+                    except Exception as ex:
+                        allowed_models = f"Exception: {str(ex)}"
+                        
                     logger.error(f"Grok API returned status {response.status_code}: {response.text}")
-                    return f"Error communicating with Grok API (Status {response.status_code}): {response.text}"
+                    return (
+                        f"⚠️ **Grok API Error (Status {response.status_code})**\n"
+                        f"Response: `{response.text}`\n\n"
+                        f"🔧 **Debug - Allowed Models for your Key:**\n`{allowed_models}`"
+                    )
                     
                 resp_json = response.json()
                 choice = resp_json["choices"][0]
