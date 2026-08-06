@@ -19,8 +19,8 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 GROK_MODEL = os.getenv("GROK_MODEL", "grok-beta")
 
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip() or None
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip() or None
 GOOGLE_REDIRECT_PORT = int(os.getenv("PORT", os.getenv("GOOGLE_REDIRECT_PORT", "8080")))
 
 DATABASE_PATH = os.getenv("DATABASE_PATH", "assistant.db")
