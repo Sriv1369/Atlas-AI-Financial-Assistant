@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import google.generativeai as genai
-from config import GEMINI_API_KEY
+from config import GEMINI_API_KEY, GEMINI_MODEL
 import database
 from tools.market_tools import get_stock_price, get_company_financials, get_company_news, get_market_indices
 from tools.web_tools import search_web, search_financial_news
@@ -185,7 +185,7 @@ Current user configuration:
         
         # We use gemini-2.5-pro since it is much better at complex multi-turn reasoning and tool calling
         model = genai.GenerativeModel(
-            model_name="gemini-2.5-pro",
+            model_name=GEMINI_MODEL,
             tools=tools,
             system_instruction=system_instruction
         )

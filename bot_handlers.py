@@ -7,6 +7,7 @@ import google.generativeai as genai
 from agent import FinancialAgent
 from tools.document_tools import process_uploaded_document
 import database
+from config import GEMINI_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +154,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_instruction = agent._get_system_instructions()
         tools = agent._get_tools()
         model = genai.GenerativeModel(
-            model_name="gemini-2.5-pro",
+            model_name=GEMINI_MODEL,
             tools=tools,
             system_instruction=system_instruction
         )
