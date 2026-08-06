@@ -24,6 +24,17 @@ async def post_init(application: Application) -> None:
     # 1. Initialize SQLite Database
     database.init_db()
     
+    # Debug print available Grok models
+    import requests
+    import os
+    grok_key = os.getenv("GROK_API_KEY")
+    if grok_key:
+        try:
+            resp = requests.get("https://api.x.ai/v1/models", headers={"Authorization": f"Bearer {grok_key}"}, timeout=10)
+            logger.info(f"DEBUG GROK MODELS (Status {resp.status_code}): {resp.text}")
+        except Exception as e:
+            logger.error(f"DEBUG GROK MODELS ERROR: {e}")
+    
     # 2. Start local OAuth callback server for Google integrations
     try:
         start_oauth_callback_server()
