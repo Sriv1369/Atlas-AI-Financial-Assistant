@@ -496,14 +496,30 @@ Current user configuration:
         
         if is_openrouter:
             url = "https://openrouter.ai/api/v1/chat/completions"
-            active_model = "meta-llama/llama-3-8b-instruct:free"
+            active_model = "meta-llama/llama-3.1-8b-instruct:free"  # Stable default fallback
             headers = {
                 "Authorization": f"Bearer {GROK_API_KEY}",
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://atlas-ai-financial-assistant.onrender.com",
                 "X-Title": "Atlas Financial Assistant"
             }
-            logger.info("OpenRouter key detected. Routing to OpenRouter with llama-3-8b free model.")
+            logger.info("OpenRouter key detected. Resolving active free model...")
+            try:
+                models_resp = requests.get("https://openrouter.ai/api/v1/models", headers={"Authorization": f"Bearer {GROK_API_KEY}"}, timeout=10)
+                if models_resp.status_code == 200:
+                    model_ids = [m["id"] for m in models_resp.json().get("data", [])]
+                    free_models = [mid for mid in model_ids if mid.endswith(":free")]
+                    if free_models:
+                        # Prefer llama-3.1-8b or gemma-2-9b for tool calling
+                        preferred = None
+                        for fm in free_models:
+                            if "llama-3.1-8b" in fm.lower() or "gemma-2-9b" in fm.lower():
+                                preferred = fm
+                                break
+                        active_model = preferred if preferred else free_models[0]
+                        logger.info(f"Dynamically resolved OpenRouter model: {active_model} (All free: {free_models})")
+            except Exception as e:
+                logger.error(f"Failed to query OpenRouter free models: {e}")
         else:
             url = "https://api.x.ai/v1/chat/completions"
             headers = {
