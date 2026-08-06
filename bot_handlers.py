@@ -15,6 +15,17 @@ logger = logging.getLogger(__name__)
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+async def safe_reply_text(message, text, **kwargs):
+    try:
+        await message.reply_text(text, **kwargs)
+    except Exception as e:
+        logger.warning(f"Failed to send message with arguments {kwargs}: {e}. Retrying as plain text...")
+        try:
+            kwargs.pop('parse_mode', None)
+            await message.reply_text(text, **kwargs)
+        except Exception as e_inner:
+            logger.error(f"Failed to send message even as plain text: {e_inner}")
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handle the /start command. Prepares the user and initiates onboarding conversation.
@@ -35,7 +46,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Pass to the agent to generate a welcoming onboarding message
     agent = FinancialAgent(chat_id)
     welcome_text = agent.chat("Start onboarding and greet me.")
-    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+    await safe_reply_text(update.message, welcome_text, parse_mode="Markdown")
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -51,7 +62,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response_text = agent.chat(user_msg)
     
     # Send response back to the user
-    await update.message.reply_text(response_text, parse_mode="Markdown")
+    await safe_reply_text(update.message, response_text, parse_mode="Markdown")
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -80,7 +91,7 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(file_path):
             os.remove(file_path)
             
-    await update.message.reply_text(response_text, parse_mode="Markdown")
+    await safe_reply_text(update.message, response_text, parse_mode="Markdown")
 
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -124,7 +135,7 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(file_path):
             os.remove(file_path)
             
-    await update.message.reply_text(response_text, parse_mode="Markdown")
+    await safe_reply_text(update.message, response_text, parse_mode="Markdown")
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -152,4 +163,4 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(file_path):
             os.remove(file_path)
             
-    await update.message.reply_text(response_text, parse_mode="Markdown")
+    await safe_reply_text(update.message, response_text, parse_mode="Markdown")
