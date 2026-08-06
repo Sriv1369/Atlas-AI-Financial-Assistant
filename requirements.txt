@@ -1,0 +1,10 @@
+python-telegram-bot==21.3
+google-generativeai==0.7.2
+yfinance==0.2.41
+python-dotenv==1.0.1
+apscheduler==3.10.4
+pypdf==4.3.1
+pandas==2.2.2
+google-auth-oauthlib==1.2.1
+google-api-python-client==2.139.0
+duckduckgo-search==6.2.4
