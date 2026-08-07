@@ -307,10 +307,65 @@ Learned user context / long-term preferences:
             update_profile
         ]
 
+    def _chat_gemini(self, user_msg: str, file_context: str = None, audio_path: str = None, image_path: str = None) -> str:
+        """
+        Internal dispatcher for Gemini model.
+        """
+        logger.info(f"Routing query to Gemini for chat_id {self.chat_id}")
+        history = database.get_chat_history(self.chat_id, limit=15)
+        system_instruction = self._get_system_instructions()
+        tools = self._get_tools()
+        
+        model = genai.GenerativeModel(
+            model_name=GEMINI_MODEL,
+            tools=tools,
+            system_instruction=system_instruction
+        )
+        
+        gemini_history = []
+        for h in history[:-1]:
+            role = 'user' if h['role'] == 'user' else 'model'
+            message_text = h['message']
+            # Clean up the fallback prefix if it was saved in history
+            if message_text.startswith("⚠️ *Grok API failed, fell back to Gemini:*"):
+                parts = message_text.split("\n\n", 1)
+                if len(parts) > 1:
+                    message_text = parts[1]
+            gemini_history.append({
+                'role': role,
+                'parts': [message_text]
+            })
+            
+        chat_session = model.start_chat(history=gemini_history, enable_automatic_function_calling=True)
+        
+        parts = []
+        if audio_path and os.path.exists(audio_path):
+            logger.info(f"Uploading audio file {audio_path} to Gemini...")
+            uploaded_file = genai.upload_file(path=audio_path, mime_type="audio/ogg")
+            parts.append(uploaded_file)
+            if user_msg:
+                parts.append(user_msg)
+            else:
+                parts.append("Respond to this voice message.")
+        elif image_path and os.path.exists(image_path):
+            logger.info(f"Uploading image file {image_path} to Gemini...")
+            uploaded_file = genai.upload_file(path=image_path, mime_type="image/jpeg")
+            parts.append(uploaded_file)
+            parts.append(user_msg or "Analyze this image.")
+        else:
+            msg_content = user_msg
+            if file_context:
+                msg_content = f"{file_context}\n\nUser Query: {user_msg}"
+            parts.append(msg_content)
+            
+        response = chat_session.send_message(parts)
+        return response.text
+
     def chat(self, user_msg: str, file_context: str = None, audio_path: str = None, image_path: str = None) -> str:
         """
         Main interface to process user inputs and returns responses.
         Routes to Grok if GROK_API_KEY is configured, otherwise routes to Gemini.
+        If Grok is configured but fails, automatically falls back to Gemini.
         """
         # Save user message to database
         database.add_chat_message(self.chat_id, 'user', user_msg)
@@ -334,59 +389,29 @@ Learned user context / long-term preferences:
                     logger.warning(f"Voice note transcription failed: {e}")
                     user_msg = f"[Uploaded Audio Note - Transcription unavailable: {str(e)}]\n{user_msg}" if user_msg else "[Uploaded Audio Note - Transcription unavailable]"
             
-            response_text = self._chat_grok(user_msg, file_context, image_path)
-            database.add_chat_message(self.chat_id, 'assistant', response_text)
-            return response_text
+            try:
+                response_text = self._chat_grok(user_msg, file_context, image_path)
+                database.add_chat_message(self.chat_id, 'assistant', response_text)
+                return response_text
+            except Exception as e:
+                logger.warning(f"Grok API call failed: {e}. Falling back to Gemini...")
+                try:
+                    gemini_response = self._chat_gemini(user_msg, file_context, audio_path, image_path)
+                    error_note = f"⚠️ *Grok API failed, fell back to Gemini:* {str(e)}\n\n"
+                    full_response = error_note + gemini_response
+                    database.add_chat_message(self.chat_id, 'assistant', full_response)
+                    return full_response
+                except Exception as ex:
+                    logger.error(f"Both Grok and Gemini APIs failed: {ex}")
+                    error_msg = f"Sorry, I encountered an issue processing that. Both Grok and Gemini APIs failed. (Grok: {str(e)} | Gemini: {str(ex)})"
+                    database.add_chat_message(self.chat_id, 'assistant', error_msg)
+                    return error_msg
 
         # Otherwise route to Gemini
-        logger.info(f"Routing query to Gemini for chat_id {self.chat_id}")
-        history = database.get_chat_history(self.chat_id, limit=15)
-        system_instruction = self._get_system_instructions()
-        tools = self._get_tools()
-        
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL,
-            tools=tools,
-            system_instruction=system_instruction
-        )
-        
-        gemini_history = []
-        for h in history[:-1]:
-            role = 'user' if h['role'] == 'user' else 'model'
-            gemini_history.append({
-                'role': role,
-                'parts': [h['message']]
-            })
-            
-        chat_session = model.start_chat(history=gemini_history, enable_automatic_function_calling=True)
-        
         try:
-            parts = []
-            if audio_path and os.path.exists(audio_path):
-                logger.info(f"Uploading audio file {audio_path} to Gemini...")
-                uploaded_file = genai.upload_file(path=audio_path, mime_type="audio/ogg")
-                parts.append(uploaded_file)
-                if user_msg:
-                    parts.append(user_msg)
-                else:
-                    parts.append("Respond to this voice message.")
-            elif image_path and os.path.exists(image_path):
-                logger.info(f"Uploading image file {image_path} to Gemini...")
-                uploaded_file = genai.upload_file(path=image_path, mime_type="image/jpeg")
-                parts.append(uploaded_file)
-                parts.append(user_msg or "Analyze this image.")
-            else:
-                msg_content = user_msg
-                if file_context:
-                    msg_content = f"{file_context}\n\nUser Query: {user_msg}"
-                parts.append(msg_content)
-                
-            response = chat_session.send_message(parts)
-            response_text = response.text
-            
+            response_text = self._chat_gemini(user_msg, file_context, audio_path, image_path)
             database.add_chat_message(self.chat_id, 'assistant', response_text)
             return response_text
-            
         except Exception as e:
             logger.error(f"Error calling Gemini API for {self.chat_id}: {e}")
             error_msg = f"Sorry, I encountered an issue processing that. Please check your credentials or try again later. (Error: {str(e)})"
@@ -923,10 +948,8 @@ Learned user context / long-term preferences:
                         allowed_models = f"Exception: {str(ex)}"
                         
                     logger.error(f"Grok API returned status {response.status_code}: {response.text}")
-                    return (
-                        f"⚠️ **Grok API Error (Status {response.status_code})**\n"
-                        f"Response: `{response.text}`\n\n"
-                        f"🔧 **Debug - Allowed Models for your Key:**\n`{allowed_models}`"
+                    raise RuntimeError(
+                        f"Grok API Status {response.status_code}: {response.text} (Allowed Models: {allowed_models})"
                     )
                     
                 resp_json = response.json()
@@ -969,6 +992,6 @@ Learned user context / long-term preferences:
                     
             except Exception as e:
                 logger.error(f"Exception during Grok API turn: {e}")
-                return f"Sorry, I encountered an issue processing that with Grok. (Error: {str(e)})"
+                raise e
                 
-        return "Grok tool execution depth limit exceeded."
+        raise RuntimeError("Grok tool execution depth limit exceeded.")
