@@ -71,6 +71,18 @@ def check_google_connection(chat_id: int) -> bool:
     """
     return get_google_creds(chat_id) is not None
 
+def _get_redirect_uri() -> str:
+    """
+    Get the OAuth redirect URI, dynamically resolving public hostname if deployed on Render or other cloud services.
+    """
+    public_url = os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL")
+    if public_url:
+        url = public_url.strip()
+        if not url.endswith("/"):
+            url += "/"
+        return url
+    return f"http://localhost:{GOOGLE_REDIRECT_PORT}/"
+
 def generate_google_auth_url(chat_id: int) -> str:
     """
     Generate Google OAuth authentication URL, passing chat_id in state.
@@ -85,7 +97,7 @@ def generate_google_auth_url(chat_id: int) -> str:
         }
     }
     
-    redirect_uri = f"http://localhost:{GOOGLE_REDIRECT_PORT}/"
+    redirect_uri = _get_redirect_uri()
     
     flow = Flow.from_client_config(
         client_config,
@@ -145,7 +157,7 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
                 }
             }
             
-            redirect_uri = f"http://localhost:{GOOGLE_REDIRECT_PORT}/"
+            redirect_uri = _get_redirect_uri()
             flow = Flow.from_client_config(
                 client_config,
                 scopes=SCOPES,
