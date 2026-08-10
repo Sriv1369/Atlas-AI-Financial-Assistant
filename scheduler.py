@@ -145,7 +145,9 @@ async def check_watchlist_anomalies(bot):
         _sent_alerts_log[today_str] = set()
         
     conn = database.get_db_connection()
-    users = conn.execute("SELECT chat_id, preferences FROM users WHERE onboarding_status = 'completed'").fetchall()
+    cursor = database.db_execute(conn, "SELECT chat_id, preferences FROM users WHERE onboarding_status = 'completed'")
+    db_rows = cursor.fetchall()
+    users = database.rows_to_list(cursor, db_rows)
     conn.close()
     
     if not users:
@@ -335,7 +337,9 @@ def init_scheduler(bot):
     
     # Load all completed users and schedule their briefings
     conn = database.get_db_connection()
-    rows = conn.execute("SELECT chat_id, preferences FROM users WHERE onboarding_status = 'completed'").fetchall()
+    cursor = database.db_execute(conn, "SELECT chat_id, preferences FROM users WHERE onboarding_status = 'completed'")
+    db_rows = cursor.fetchall()
+    rows = database.rows_to_list(cursor, db_rows)
     conn.close()
     
     for row in rows:
