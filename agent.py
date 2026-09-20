@@ -14,6 +14,10 @@ from tools.google_tools import (
     generate_google_auth_url, check_google_connection, write_google_sheet,
     get_email_details, search_google_drive, read_google_drive_file
 )
+from tools.expense_tools import (
+    sync_email_transactions, get_monthly_expense_report,
+    list_recent_transactions, export_monthly_expenses_to_sheets
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +88,10 @@ Learned user context / long-term preferences:
 7. **Research & Context:** If the user's query is vague, ask follow-up questions to understand if they want financials, news, stock trends, or due diligence.
 8. **Data Sourcing:** Use tools for real-time data. Cite facts. If uncertain, state it clearly.
 9. **Task Automation:** Use Google Workspace tools to view calendars, schedule meetings, search emails, or read sheets as requested.
+10. **Expense & Transaction Tracking:** You can track and calculate the user's monthly expenses, debit/credit transactions, and savings rate directly from their Gmail bank alert emails.
+    - When the user asks about their expenses, spending, debits, credits, or monthly budget (e.g., "calculate my monthly expenses", "how much did I spend this month?", "check my debits"), use `get_monthly_expense_report` or `sync_email_transactions`.
+    - If they want to refresh or import new transactions from bank alert emails, use `sync_email_transactions`.
+    - You can inspect recent transactions with `list_recent_transactions` or export them to Google Sheets with `export_monthly_expenses_to_sheets`.
 """
         return system_prompt
 
@@ -257,6 +265,22 @@ Learned user context / long-term preferences:
             database.delete_user_memory(self.chat_id, memory_id)
             return f"Memory {memory_id} deleted."
 
+        def sync_email_transactions_tool(days_back: int = 30) -> str:
+            """Scan Gmail for bank transaction emails (debits, credits, UPI, cards) and record them into your expense ledger."""
+            return sync_email_transactions(self.chat_id, days_back)
+
+        def get_monthly_expense_report_tool(month: int = None, year: int = None) -> str:
+            """Get an executive summary of your monthly expenses, income/credits, net cash flow, category breakdown, and top spending merchants."""
+            return get_monthly_expense_report(self.chat_id, month, year)
+
+        def list_recent_transactions_tool(limit: int = 10, transaction_type: str = None, category: str = None) -> str:
+            """List recent debit/credit transactions with merchant, amount, category, and date. transaction_type can be 'DEBIT', 'CREDIT', or None."""
+            return list_recent_transactions(self.chat_id, limit, transaction_type, category)
+
+        def export_monthly_expenses_to_sheets_tool(spreadsheet_name: str = None, month: int = None, year: int = None) -> str:
+            """Export your monthly transaction ledger and breakdown to a Google Sheet."""
+            return export_monthly_expenses_to_sheets(self.chat_id, spreadsheet_name, month, year)
+
         # Assign natural names so Gemini recognizes them properly
         list_calendar_events_tool.__name__ = "list_calendar_events"
         create_calendar_event_tool.__name__ = "create_calendar_event"
@@ -276,6 +300,10 @@ Learned user context / long-term preferences:
         delete_custom_alert_tool.__name__ = "delete_custom_alert"
         store_user_memory_tool.__name__ = "store_user_memory"
         delete_user_memory_tool.__name__ = "delete_user_memory"
+        sync_email_transactions_tool.__name__ = "sync_email_transactions"
+        get_monthly_expense_report_tool.__name__ = "get_monthly_expense_report"
+        list_recent_transactions_tool.__name__ = "list_recent_transactions"
+        export_monthly_expenses_to_sheets_tool.__name__ = "export_monthly_expenses_to_sheets"
 
         return [
             get_stock_price,
@@ -302,6 +330,10 @@ Learned user context / long-term preferences:
             delete_custom_alert_tool,
             store_user_memory_tool,
             delete_user_memory_tool,
+            sync_email_transactions_tool,
+            get_monthly_expense_report_tool,
+            list_recent_transactions_tool,
+            export_monthly_expenses_to_sheets_tool,
             get_google_auth_link,
             update_watchlist,
             update_profile
@@ -817,6 +849,63 @@ Learned user context / long-term preferences:
                             "memory_id": {"type": "integer", "description": "Memory database ID"}
                         },
                         "required": ["memory_id"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "sync_email_transactions",
+                    "description": "Scan Gmail for bank and payment transaction emails (debits, credits, UPI, cards) and record them into the expense ledger.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "days_back": {"type": "integer", "description": "Number of past days to scan (default: 30)"}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_monthly_expense_report",
+                    "description": "Get an executive summary of monthly expenses, income/credits, net cash flow, category breakdown, and top spending merchants.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "month": {"type": "integer", "description": "Month number (1-12, defaults to current month)"},
+                            "year": {"type": "integer", "description": "Year (e.g. 2026, defaults to current year)"}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_recent_transactions",
+                    "description": "List recent debit/credit transactions with merchant, amount, category, and date.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {"type": "integer", "description": "Max number of transactions to list (default 10)"},
+                            "transaction_type": {"type": "string", "description": "'DEBIT', 'CREDIT', or null for all"},
+                            "category": {"type": "string", "description": "Optional category filter"}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "export_monthly_expenses_to_sheets",
+                    "description": "Export monthly transaction ledger and breakdown to a Google Sheet.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "spreadsheet_name": {"type": "string", "description": "Optional title for the Google Sheet"},
+                            "month": {"type": "integer", "description": "Month number (1-12)"},
+                            "year": {"type": "integer", "description": "Year (e.g. 2026)"}
+                        }
                     }
                 }
             }

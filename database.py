@@ -132,6 +132,28 @@ def init_db():
             FOREIGN KEY(chat_id) REFERENCES users(chat_id)
         )
         """)
+
+        # Create Transactions Table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS transactions (
+            id SERIAL PRIMARY KEY,
+            chat_id BIGINT,
+            message_id TEXT,
+            date TEXT,
+            amount REAL,
+            currency TEXT DEFAULT 'INR',
+            transaction_type TEXT, -- 'DEBIT' or 'CREDIT'
+            merchant TEXT,
+            category TEXT,
+            account_ref TEXT,
+            raw_snippet TEXT,
+            created_at TEXT,
+            FOREIGN KEY(chat_id) REFERENCES users(chat_id),
+            UNIQUE(chat_id, message_id)
+        )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_user_date ON transactions(chat_id, date)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(chat_id, category)")
     else:
         # Create Users Table
         cursor.execute("""
@@ -204,6 +226,28 @@ def init_db():
             FOREIGN KEY(chat_id) REFERENCES users(chat_id)
         )
         """)
+
+        # Create Transactions Table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            message_id TEXT,
+            date TEXT,
+            amount REAL,
+            currency TEXT DEFAULT 'INR',
+            transaction_type TEXT, -- 'DEBIT' or 'CREDIT'
+            merchant TEXT,
+            category TEXT,
+            account_ref TEXT,
+            raw_snippet TEXT,
+            created_at TEXT,
+            FOREIGN KEY(chat_id) REFERENCES users(chat_id),
+            UNIQUE(chat_id, message_id)
+        )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_user_date ON transactions(chat_id, date)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(chat_id, category)")
         
     conn.commit()
     conn.close()
@@ -467,3 +511,218 @@ def delete_user_memory(chat_id: int, memory_id: int):
     db_execute(conn, "DELETE FROM user_memories WHERE chat_id = ? AND id = ?", (chat_id, memory_id))
     conn.commit()
     conn.close()
+
+# --- Transactions & Expense Tracker Helper Functions ---
+
+def save_transaction(
+    chat_id: int,
+    message_id: str,
+    date: str,
+    amount: float,
+    currency: str = 'INR',
+    transaction_type: str = 'DEBIT',
+    merchant: str = None,
+    category: str = 'Other',
+    account_ref: str = None,
+    raw_snippet: str = None
+) -> bool:
+    """
+    Save a parsed transaction to database with deduplication on (chat_id, message_id).
+    Returns True if a new transaction was inserted, False if it was already present.
+    """
+    conn = get_db_connection()
+    timestamp = datetime.now().isoformat()
+    cursor = conn.cursor()
+    
+    if IS_POSTGRES:
+        sql = """
+        INSERT INTO transactions (
+            chat_id, message_id, date, amount, currency, transaction_type,
+            merchant, category, account_ref, raw_snippet, created_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (chat_id, message_id) DO NOTHING
+        """
+        cursor.execute(sql, (
+            chat_id, message_id, date, amount, currency, transaction_type,
+            merchant, category, account_ref, raw_snippet, timestamp
+        ))
+        inserted = cursor.rowcount > 0
+    else:
+        sql = """
+        INSERT OR IGNORE INTO transactions (
+            chat_id, message_id, date, amount, currency, transaction_type,
+            merchant, category, account_ref, raw_snippet, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        cursor.execute(sql, (
+            chat_id, message_id, date, amount, currency, transaction_type,
+            merchant, category, account_ref, raw_snippet, timestamp
+        ))
+        inserted = cursor.rowcount > 0
+        
+    conn.commit()
+    conn.close()
+    return inserted
+
+def get_existing_transaction_message_ids(chat_id: int) -> set:
+    """
+    Get a set of all Gmail message_ids already stored for this user to enable O(1) deduplication.
+    """
+    conn = get_db_connection()
+    cursor = db_execute(conn, "SELECT message_id FROM transactions WHERE chat_id = ?", (chat_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    if IS_POSTGRES:
+        return {r[0] for r in rows}
+    return {r['message_id'] for r in rows}
+
+def get_transactions(
+    chat_id: int,
+    start_date: str = None,
+    end_date: str = None,
+    transaction_type: str = None,
+    category: str = None,
+    limit: int = 50
+) -> list:
+    """
+    Query transactions with optional date range, type, category filtering.
+    """
+    conn = get_db_connection()
+    query = "SELECT * FROM transactions WHERE chat_id = ?"
+    params = [chat_id]
+    
+    if start_date:
+        query += " AND date >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND date <= ?"
+        params.append(end_date)
+    if transaction_type:
+        query += " AND UPPER(transaction_type) = ?"
+        params.append(transaction_type.upper().strip())
+    if category:
+        query += " AND LOWER(category) = ?"
+        params.append(category.lower().strip())
+        
+    query += " ORDER BY date DESC, id DESC LIMIT ?"
+    params.append(limit)
+    
+    cursor = db_execute(conn, query, tuple(params))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows_to_list(cursor, rows)
+
+def get_monthly_expense_summary(chat_id: int, year: int, month: int) -> dict:
+    """
+    Compute aggregate monthly statistics: total debited, total credited, net savings, transaction counts.
+    """
+    conn = get_db_connection()
+    month_prefix = f"{year:04d}-{month:02d}%"
+    
+    cursor = db_execute(conn, """
+    SELECT 
+        COALESCE(SUM(CASE WHEN transaction_type = 'DEBIT' THEN amount ELSE 0 END), 0) as total_debited,
+        COALESCE(SUM(CASE WHEN transaction_type = 'CREDIT' THEN amount ELSE 0 END), 0) as total_credited,
+        COUNT(CASE WHEN transaction_type = 'DEBIT' THEN 1 END) as count_debited,
+        COUNT(CASE WHEN transaction_type = 'CREDIT' THEN 1 END) as count_credited
+    FROM transactions 
+    WHERE chat_id = ? AND date LIKE ?
+    """, (chat_id, month_prefix))
+    
+    row = cursor.fetchone()
+    conn.close()
+    
+    summary = row_to_dict(cursor, row) if row else {
+        'total_debited': 0.0,
+        'total_credited': 0.0,
+        'count_debited': 0,
+        'count_credited': 0
+    }
+    
+    total_debited = float(summary.get('total_debited') or 0.0)
+    total_credited = float(summary.get('total_credited') or 0.0)
+    net_savings = total_credited - total_debited
+    savings_rate = (net_savings / total_credited * 100) if total_credited > 0 else 0.0
+    
+    return {
+        'year': year,
+        'month': month,
+        'total_debited': total_debited,
+        'total_credited': total_credited,
+        'net_savings': net_savings,
+        'savings_rate': round(savings_rate, 1),
+        'count_debited': int(summary.get('count_debited') or 0),
+        'count_credited': int(summary.get('count_credited') or 0),
+        'total_transactions': int(summary.get('count_debited') or 0) + int(summary.get('count_credited') or 0)
+    }
+
+def get_category_breakdown(chat_id: int, year: int, month: int) -> list:
+    """
+    Returns breakdown of expenses by category with totals and percentages.
+    """
+    conn = get_db_connection()
+    month_prefix = f"{year:04d}-{month:02d}%"
+    
+    cursor = db_execute(conn, """
+    SELECT 
+        category,
+        COALESCE(SUM(amount), 0) as total_amount,
+        COUNT(*) as count
+    FROM transactions 
+    WHERE chat_id = ? AND date LIKE ? AND transaction_type = 'DEBIT'
+    GROUP BY category
+    ORDER BY total_amount DESC
+    """, (chat_id, month_prefix))
+    
+    rows = cursor.fetchall()
+    conn.close()
+    categories = rows_to_list(cursor, rows)
+    
+    total_spend = sum(float(c['total_amount']) for c in categories)
+    for c in categories:
+        amt = float(c['total_amount'])
+        c['total_amount'] = amt
+        c['percentage'] = round((amt / total_spend * 100), 1) if total_spend > 0 else 0.0
+        
+    return categories
+
+def get_top_merchants(chat_id: int, year: int, month: int, limit: int = 5) -> list:
+    """
+    Returns top spending merchants for a given month.
+    """
+    conn = get_db_connection()
+    month_prefix = f"{year:04d}-{month:02d}%"
+    
+    cursor = db_execute(conn, """
+    SELECT 
+        merchant,
+        COALESCE(SUM(amount), 0) as total_amount,
+        COUNT(*) as count
+    FROM transactions 
+    WHERE chat_id = ? AND date LIKE ? AND transaction_type = 'DEBIT'
+      AND merchant IS NOT NULL AND TRIM(merchant) != ''
+    GROUP BY merchant
+    ORDER BY total_amount DESC
+    LIMIT ?
+    """, (chat_id, month_prefix, limit))
+    
+    rows = cursor.fetchall()
+    conn.close()
+    merchants = rows_to_list(cursor, rows)
+    for m in merchants:
+        m['total_amount'] = float(m['total_amount'])
+    return merchants
+
+def delete_user_transactions(chat_id: int) -> int:
+    """
+    Delete all stored transactions for a user.
+    """
+    conn = get_db_connection()
+    cursor = db_execute(conn, "DELETE FROM transactions WHERE chat_id = ?", (chat_id,))
+    count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return count
+
