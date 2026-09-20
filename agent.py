@@ -348,50 +348,103 @@ Learned user context / long-term preferences:
         system_instruction = self._get_system_instructions()
         tools = self._get_tools()
         
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL,
-            tools=tools,
-            system_instruction=system_instruction
-        )
-        
-        gemini_history = []
-        for h in history[:-1]:
-            role = 'user' if h['role'] == 'user' else 'model'
-            message_text = h['message']
-            # Clean up the fallback prefix if it was saved in history
-            if message_text.startswith("⚠️ *Grok API failed, fell back to Gemini:*"):
-                parts = message_text.split("\n\n", 1)
-                if len(parts) > 1:
-                    message_text = parts[1]
-            gemini_history.append({
-                'role': role,
-                'parts': [message_text]
-            })
+        model_name = GEMINI_MODEL
+        try:
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                tools=tools,
+                system_instruction=system_instruction
+            )
             
-        chat_session = model.start_chat(history=gemini_history, enable_automatic_function_calling=True)
-        
-        parts = []
-        if audio_path and os.path.exists(audio_path):
-            logger.info(f"Uploading audio file {audio_path} to Gemini...")
-            uploaded_file = genai.upload_file(path=audio_path, mime_type="audio/ogg")
-            parts.append(uploaded_file)
-            if user_msg:
-                parts.append(user_msg)
+            gemini_history = []
+            for h in history[:-1]:
+                role = 'user' if h['role'] == 'user' else 'model'
+                message_text = h['message']
+                # Clean up the fallback prefix if it was saved in history
+                if message_text.startswith("⚠️ *Grok API failed, fell back to Gemini:*"):
+                    parts = message_text.split("\n\n", 1)
+                    if len(parts) > 1:
+                        message_text = parts[1]
+                gemini_history.append({
+                    'role': role,
+                    'parts': [message_text]
+                })
+                
+            chat_session = model.start_chat(history=gemini_history, enable_automatic_function_calling=True)
+            
+            parts = []
+            if audio_path and os.path.exists(audio_path):
+                logger.info(f"Uploading audio file {audio_path} to Gemini...")
+                uploaded_file = genai.upload_file(path=audio_path, mime_type="audio/ogg")
+                parts.append(uploaded_file)
+                if user_msg:
+                    parts.append(user_msg)
+                else:
+                    parts.append("Respond to this voice message.")
+            elif image_path and os.path.exists(image_path):
+                logger.info(f"Uploading image file {image_path} to Gemini...")
+                uploaded_file = genai.upload_file(path=image_path, mime_type="image/jpeg")
+                parts.append(uploaded_file)
+                parts.append(user_msg or "Analyze this image.")
             else:
-                parts.append("Respond to this voice message.")
-        elif image_path and os.path.exists(image_path):
-            logger.info(f"Uploading image file {image_path} to Gemini...")
-            uploaded_file = genai.upload_file(path=image_path, mime_type="image/jpeg")
-            parts.append(uploaded_file)
-            parts.append(user_msg or "Analyze this image.")
-        else:
-            msg_content = user_msg
-            if file_context:
-                msg_content = f"{file_context}\n\nUser Query: {user_msg}"
-            parts.append(msg_content)
+                msg_content = user_msg
+                if file_context:
+                    msg_content = f"{file_context}\n\nUser Query: {user_msg}"
+                parts.append(msg_content)
+                
+            response = chat_session.send_message(parts)
+            return response.text
             
-        response = chat_session.send_message(parts)
-        return response.text
+        except Exception as e:
+            # Check if it was a model not found / resource not found error
+            if model_name != "gemini-1.5-flash" and ("not found" in str(e).lower() or "404" in str(e) or "no longer available" in str(e).lower() or "not available" in str(e).lower()):
+                logger.warning(f"Configured Gemini model '{model_name}' failed with: {e}. Falling back to default 'gemini-1.5-flash'...")
+                model = genai.GenerativeModel(
+                    model_name="gemini-1.5-flash",
+                    tools=tools,
+                    system_instruction=system_instruction
+                )
+                
+                gemini_history = []
+                for h in history[:-1]:
+                    role = 'user' if h['role'] == 'user' else 'model'
+                    message_text = h['message']
+                    # Clean up the fallback prefix if it was saved in history
+                    if message_text.startswith("⚠️ *Grok API failed, fell back to Gemini:*"):
+                        parts = message_text.split("\n\n", 1)
+                        if len(parts) > 1:
+                            message_text = parts[1]
+                    gemini_history.append({
+                        'role': role,
+                        'parts': [message_text]
+                    })
+                    
+                chat_session = model.start_chat(history=gemini_history, enable_automatic_function_calling=True)
+                
+                parts = []
+                if audio_path and os.path.exists(audio_path):
+                    logger.info(f"Uploading audio file {audio_path} to Gemini...")
+                    uploaded_file = genai.upload_file(path=audio_path, mime_type="audio/ogg")
+                    parts.append(uploaded_file)
+                    if user_msg:
+                        parts.append(user_msg)
+                    else:
+                        parts.append("Respond to this voice message.")
+                elif image_path and os.path.exists(image_path):
+                    logger.info(f"Uploading image file {image_path} to Gemini...")
+                    uploaded_file = genai.upload_file(path=image_path, mime_type="image/jpeg")
+                    parts.append(uploaded_file)
+                    parts.append(user_msg or "Analyze this image.")
+                else:
+                    msg_content = user_msg
+                    if file_context:
+                        msg_content = f"{file_context}\n\nUser Query: {user_msg}"
+                    parts.append(msg_content)
+                    
+                response = chat_session.send_message(parts)
+                return response.text
+            else:
+                raise e
 
     def chat(self, user_msg: str, file_context: str = None, audio_path: str = None, image_path: str = None) -> str:
         """
